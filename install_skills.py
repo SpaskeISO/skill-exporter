@@ -3,7 +3,11 @@
 
 Reads the JSON written by export_skills.py and runs, for each skill:
 
-    npx skills add <source> --skill <name> --global --yes
+    npx skills add <source> --skill <name> --global --yes --agent <agents...>
+
+Agents come from the export. PromptScript and Eve are omitted because they
+have no global skills directory; leaving agent selection to the CLI adds every
+universal agent and those two then fail the install.
 
 The skills CLI uses symlink mode unless `--copy` is passed, so each skill is
 linked from the agent directories to the global canonical copy.
@@ -37,6 +41,48 @@ def is_local_skill(skill: dict[str, Any]) -> bool:
     return False
 
 
+# Display names whose CLI id is not the hyphenated lowercase form.
+_AGENT_IDS = {
+    "AiderDesk": "aider-desk",
+    "Autohand Code CLI": "autohand-code",
+    "IBM Bob": "bob",
+    "Code Studio": "codestudio",
+    "Cortex Code": "cortex",
+    "Deep Agents": "deepagents",
+    "Devin for Terminal": "devin",
+    "Grok Build": "grok",
+    "inference.sh": "inference-sh",
+    "Kilo Code": "kilo",
+    "Rovo Dev": "rovodev",
+    "Roo Code": "roo",
+}
+
+# These agents reject `skills add --global`.
+_NO_GLOBAL_AGENTS = {"promptscript", "eve"}
+
+
+def agent_id(label: str) -> str:
+    """Map a skills-list display name to a CLI agent id."""
+    label = label.strip()
+    if label in _AGENT_IDS:
+        return _AGENT_IDS[label]
+    return label.lower().replace(" ", "-")
+
+
+def target_agents(skill: dict[str, Any]) -> list[str]:
+    """Return global-capable agent ids recorded on an exported skill."""
+    agents: list[str] = []
+    raw = skill.get("agents") or []
+    if not isinstance(raw, list):
+        return agents
+    for label in raw:
+        agent = agent_id(str(label))
+        if not agent or agent in _NO_GLOBAL_AGENTS or agent in agents:
+            continue
+        agents.append(agent)
+    return agents
+
+
 def package_spec(skill: dict[str, Any]) -> str | None:
     """Return the package argument for `skills add`, or None if it cannot be installed."""
     if is_local_skill(skill):
@@ -48,9 +94,14 @@ def package_spec(skill: dict[str, Any]) -> str | None:
     return source_url or None
 
 
-def build_add_command(npx: str, package: str, skill_name: str) -> list[str]:
+def build_add_command(
+    npx: str,
+    package: str,
+    skill_name: str,
+    agents: list[str],
+) -> list[str]:
     """Build a global symlink install command for one skill."""
-    return [
+    command = [
         npx,
         "--yes",
         "skills",
@@ -61,6 +112,10 @@ def build_add_command(npx: str, package: str, skill_name: str) -> list[str]:
         "--global",
         "--yes",
     ]
+    if agents:
+        command.append("--agent")
+        command.extend(agents)
+    return command
 
 
 def load_export(path: str) -> list[dict[str, Any]]:
@@ -84,8 +139,16 @@ def install_skill(npx: str, skill: dict[str, Any]) -> bool:
         print(f"Skipped {label}: no remote source", file=sys.stderr)
         return False
 
-    command = build_add_command(npx, package, name)
-    print(f"Installing {name} from {package}", file=sys.stderr)
+    agents = target_agents(skill)
+    if not agents:
+        print(f"Skipped {name}: no agents that support global install", file=sys.stderr)
+        return False
+
+    command = build_add_command(npx, package, name, agents)
+    print(
+        f"Installing {name} from {package} for {', '.join(agents)}",
+        file=sys.stderr,
+    )
     result = subprocess.run(command, check=False)
     if result.returncode != 0:
         print(f"Failed to install {name} (exit {result.returncode})", file=sys.stderr)
